@@ -472,7 +472,7 @@
 pub struct ReadmeDoctests;
 
 /// include FACETED_SEARCH.md in documentation
-#[cfg_attr(doctest, doc = include_str!("../../FACETED_SEARCH.md"))]
+#[cfg_attr(doctest, doc = include_str!("../../docs/FACETED_SEARCH.md"))]
 pub struct ReadmeDoctests2;
 
 use std::sync::LazyLock;
