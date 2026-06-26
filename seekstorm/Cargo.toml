@@ -67,7 +67,6 @@ chrono = "0.4.45"
 utoipa = { version ="5.5.0",  features = ["preserve_order","preserve_path_order","yaml","indexmap"]}
 num_cpus = "1.17.0"
 csv = "1.4.0"
-tokio-test = "0.4.5"
 snap = "1.1.1"
 lz4_flex = "0.13.1"
 bytemuck = { version = "1.25.0", features = ["derive","extern_crate_alloc"] }
@@ -80,6 +79,9 @@ rkyv = "0.8.16"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winapi = { version ="0.3.9",  features = ["winbase"]}
+
+[dev-dependencies]
+tokio-test = "0.4.5"
 
 [lints]
 workspace = true
