@@ -203,15 +203,6 @@ impl VectorEngine {
         }
     }
 
-        // 更新分区墓碑
-        let ivf = self.ivf.read().await;
-        let partitions = ivf.partitions.read().await;
-        if let Some(partition) = partitions.get(&partition_id) {
-            partition.delete_vector(doc_id).await;
-        }
-
-        Ok(())
-    }
 
     /// 搜索向量（穷举 nprobe 个分区）。
     pub async fn search(&self, query: &[f32], top_k: usize) -> Result<Vec<ScoredResult>> {
