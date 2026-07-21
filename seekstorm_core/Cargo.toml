@@ -1,0 +1,40 @@
+[package]
+name = "seekstorm_core"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "SeekStorm v4 core library: simple LSM storage, schemaless docs, tantivy lexical, SPFresh-style LIRE vector"
+repository = "https://github.com/SeekStorm/SeekStorm"
+keywords = ["search", "lsm", "storage", "database"]
+categories = ["database-implementations", "data-structures"]
+
+[lib]
+name = "seekstorm_core"
+path = "src/lib.rs"
+
+[dependencies]
+crossbeam-skiplist = "0.1"
+moka = { version = "0.12", features = ["future"] }
+crc32fast = "1.4"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytemuck = { version = "1", features = ["derive"] }
+ahash = "0.8"
+anyhow = "1"
+thiserror = "1"
+async-trait = "0.1"
+indexmap = { version = "2", features = ["serde"] }
+tracing = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["std", "alloc"] }
+tantivy = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+
+[lints.rust]
+unused_import_braces = "warn"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+unused_qualifications = "warn"

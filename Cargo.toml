@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "seekstorm",
+    "seekstorm_core",
     "seekstorm_server",
     "seekstorm_client"
 ]
