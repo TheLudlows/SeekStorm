@@ -42,12 +42,15 @@ const OP_PUT: u8 = 0;
 const OP_DELETE: u8 = 1;
 const OP_PARTITION_SPLIT: u8 = 2;
 const OP_CHECKPOINT: u8 = 3;
+const OP_BATCH_PUT: u8 = 4;
 
 /// WAL 操作记录。
 #[derive(Clone, Debug)]
 pub enum WalOp {
     /// 插入 / 更新。`key.lsn` 在 `append` 时会被覆盖。
     Put { key: LsmKey, value: LsmValue },
+    /// 批量插入 / 更新。所有条目共享起始 LSN。
+    BatchPut { entries: Vec<(LsmKey, LsmValue)> },
     /// 删除（墓碑）。
     Delete { namespace: u8, doc_id: u64 },
     /// 分区分裂。
@@ -60,6 +63,7 @@ impl WalOp {
     fn op_code(&self) -> u8 {
         match self {
             WalOp::Put { .. } => OP_PUT,
+            WalOp::BatchPut { .. } => OP_BATCH_PUT,
             WalOp::Delete { .. } => OP_DELETE,
             WalOp::PartitionSplit { .. } => OP_PARTITION_SPLIT,
             WalOp::Checkpoint { .. } => OP_CHECKPOINT,
@@ -72,6 +76,17 @@ impl WalOp {
                 let mut buf = Vec::with_capacity(LsmKey::ENCODED_LEN + value.encoded_len());
                 buf.extend_from_slice(&key.encode());
                 buf.extend_from_slice(&value.encode());
+                buf
+            }
+            WalOp::BatchPut { entries } => {
+                let mut buf = Vec::new();
+                // 写入条目数量（u32）
+                buf.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+                // 写入每个条目
+                for (key, value) in entries {
+                    buf.extend_from_slice(&key.encode());
+                    buf.extend_from_slice(&value.encode());
+                }
                 buf
             }
             WalOp::Delete { namespace, doc_id } => {
@@ -103,6 +118,26 @@ impl WalOp {
                 key.lsn = lsn;
                 let value = LsmValue::decode(&payload[LsmKey::ENCODED_LEN..])?;
                 Ok(WalOp::Put { key, value })
+            }
+            OP_BATCH_PUT => {
+                if payload.len() < 4 {
+                    anyhow::bail!("BatchPut payload too short: {}", payload.len());
+                }
+                let count = u32::from_be_bytes(payload[0..4].try_into().unwrap()) as usize;
+                let mut entries = Vec::with_capacity(count);
+                let mut offset = 4;
+                for _ in 0..count {
+                    if offset + LsmKey::ENCODED_LEN > payload.len() {
+                        anyhow::bail!("BatchPut: incomplete key at offset {}", offset);
+                    }
+                    let mut key = LsmKey::decode(&payload[offset..offset + LsmKey::ENCODED_LEN])?;
+                    key.lsn = lsn;
+                    offset += LsmKey::ENCODED_LEN;
+                    let value = LsmValue::decode(&payload[offset..])?;
+                    offset += value.encoded_len();
+                    entries.push((key, value));
+                }
+                Ok(WalOp::BatchPut { entries })
             }
             OP_DELETE => {
                 if payload.len() < 9 {
@@ -202,6 +237,43 @@ impl Wal {
         }
 
         Ok(lsn)
+    }
+
+    /// 批量追加记录，返回起始 lsn。所有记录共享起始 LSN。
+    pub async fn append_batch(&self, entries: Vec<(LsmKey, LsmValue)>) -> Result<u64> {
+        if entries.is_empty() {
+            return Ok(self.next_lsn.load(Ordering::SeqCst));
+        }
+
+        let start_lsn = self.next_lsn.fetch_add(entries.len() as u64, Ordering::SeqCst);
+
+        let op = WalOp::BatchPut {
+            entries: entries.clone(),
+        };
+        let op_code = op.op_code();
+        let payload = op.encode_payload();
+        let record = encode_record(start_lsn, op_code, &payload);
+
+        let offset = self
+            .current_size
+            .fetch_add(record.len() as u64, Ordering::SeqCst);
+        self.io.write_at(&self.path, offset, &record).await?;
+
+        match self.sync_policy {
+            WalSync::EveryCommit => {
+                self.io.fsync(&self.path).await?;
+            }
+            WalSync::Periodic(_) => {
+                // TODO: 批量 fsync。
+            }
+            WalSync::None => {}
+        }
+
+        if self.current_size.load(Ordering::SeqCst) > self.rotate_size {
+            let _ = self.rotate().await;
+        }
+
+        Ok(start_lsn)
     }
 
     /// 主动 fsync。
@@ -423,5 +495,48 @@ mod tests {
         wal.truncate_to(2).await.unwrap();
         let records = wal.recover().await.unwrap();
         assert_eq!(records.len(), 2); // lsn 0, 1 保留
+    }
+
+    #[tokio::test]
+    async fn test_wal_batch_put() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.wal");
+        let io: Arc<dyn IoBackend> = select_backend(IoBackendKind::AsyncFs);
+        let wal = Wal::open(path.clone(), io.clone(), WalSync::EveryCommit)
+            .await
+            .unwrap();
+
+        let entries = vec![
+            (LsmKey::doc(1), LsmValue::Data(b"a".to_vec())),
+            (LsmKey::doc(2), LsmValue::Data(b"b".to_vec())),
+            (LsmKey::doc(3), LsmValue::Data(b"c".to_vec())),
+        ];
+
+        let start_lsn = wal.append_batch(entries).await.unwrap();
+        assert_eq!(start_lsn, 0);
+        assert_eq!(wal.next_lsn(), 3);
+
+        // 恢复验证
+        let records = wal.recover().await.unwrap();
+        assert_eq!(records.len(), 1); // 单条 BatchPut 记录
+        assert!(matches!(records[0].op, WalOp::BatchPut { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_wal_empty_batch() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.wal");
+        let io: Arc<dyn IoBackend> = Arc::new(AsyncFsBackend::new());
+        let wal = Wal::open(path.clone(), io.clone(), WalSync::EveryCommit)
+            .await
+            .unwrap();
+
+        // 空批量应该返回当前 LSN，不写入
+        let lsn = wal.append_batch(vec![]).await.unwrap();
+        assert_eq!(lsn, 0);
+
+        // 验证 WAL 为空
+        let records = wal.recover().await.unwrap();
+        assert_eq!(records.len(), 0);
     }
 }

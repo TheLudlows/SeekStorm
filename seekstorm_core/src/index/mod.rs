@@ -146,14 +146,14 @@ impl Index {
 
     /// 插入文档。返回分配的 doc_id。
     ///
-    /// 流程（与 V4_PHASED_IMPLEMENTATION.md §2.3 一致）：
+    /// 流程（批量写入优化）：
     /// 1. Schema 推断（冲突即报错）
     /// 2. 分配 doc_id
-    /// 3. 序列化
-    /// 4. 写入 LSM DocStore
-    /// 5. 写入词法索引（Phase 3）
-    /// 6. 若有向量字段，写入 VectorPart（Phase 4 接入）
-    /// 7. Schema 变更同步到 Meta 命名空间
+    /// 3. 序列化文档
+    /// 4. 收集所有 LSM entries（DocStore + 词法索引 + 向量索引）
+    /// 5. 批量写入 LSM（单次 WAL fsync）
+    /// 6. 内存状态更新（lexical total_docs, vector partition counts）
+    /// 7. Schema 变更同步（若有）
     pub async fn add_document(&self, doc: SchemalessDoc) -> Result<DocId> {
         // [1] Schema 推断
         let changes = {
@@ -164,40 +164,61 @@ impl Index {
         // [2] 分配 doc_id
         let doc_id = self.next_doc_id.fetch_add(1, Ordering::SeqCst);
 
-        // [3] 序列化
-        let bytes = doc.to_bytes()?;
+        // [3] 序列化文档
+        let doc_bytes = doc.to_bytes()?;
 
-        // [4] 写入 LSM DocStore
-        let key = LsmKey {
-            namespace: NS_DOC,
-            partition_or_segment: 0,
-            doc_id,
-            lsn: 0,
-        };
-        self.lsm.put(key, LsmValue::Data(bytes)).await?;
+        // [4] 收集批量写入项
+        let mut batch_entries = Vec::new();
 
-        // [5] 写入词法索引（Phase 3）
+        // 4a) 文档存储
+        batch_entries.push((
+            LsmKey::doc(doc_id),
+            LsmValue::Data(doc_bytes)
+        ));
+
+        // 4b) 词法索引 postings
         if let Some(lexical) = self.lexical.get() {
-            lexical.add_document(doc_id, &doc).await?;
+            let lexical_entries = lexical.prepare_add_document(doc_id, &doc).await?;
+            batch_entries.extend(lexical_entries);
         }
 
-        // [6] 向量字段：Phase 4 接入
-        if let Some((_name, _vec)) = doc.get_vector_field() {
-            // TODO Phase 4: self.vector.get().unwrap().add_vector(doc_id, &_vec).await?;
-        }
+        // 4c) 向量索引（Phase 4）
+        let vector_partition_ids = if let Some(vector) = self.vector.get() {
+            let (vec_entries, partition_ids) = vector.prepare_add_document(doc_id, &doc).await?;
+            batch_entries.extend(vec_entries);
+            Some(partition_ids)
+        } else {
+            None
+        };
 
-        // [7] Schema 变更同步到 Meta 命名空间
+        // 4d) Schema 变更同步（若有）
+        let mut meta_entry = None;
         if !changes.is_empty() {
-            let snapshot = {
+            let schema_snapshot = {
                 let schema = self.schema.read().await;
                 schema.serialize().await
             };
-            self.lsm
-                .put(
-                    LsmKey::meta(META_KEY_SCHEMA),
-                    LsmValue::Data(snapshot),
-                )
-                .await?;
+            meta_entry = Some((
+                LsmKey::meta(META_KEY_SCHEMA),
+                LsmValue::Data(schema_snapshot)
+            ));
+        }
+
+        // [5] 批量写入 LSM（包含 Meta）
+        if let Some(meta) = meta_entry {
+            batch_entries.push(meta);
+        }
+        self.lsm.batch_put(batch_entries).await?;
+
+        // [6] 内存状态更新（不涉及 LSM）
+        // 词法引擎：已在 prepare_add_document 中更新 total_docs
+        // 向量引擎：更新分区计数
+        if let Some(partition_ids) = vector_partition_ids {
+            if let Some(vector) = self.vector.get() {
+                for partition_id in partition_ids {
+                    vector.update_partition_count(doc_id, partition_id).await;
+                }
+            }
         }
 
         Ok(doc_id)

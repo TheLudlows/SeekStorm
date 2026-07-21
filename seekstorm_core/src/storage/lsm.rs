@@ -369,6 +369,12 @@ impl LsmEngine {
                 WalOp::Put { key, value } => {
                     memtable.insert(key, value);
                 }
+                WalOp::BatchPut { entries } => {
+                    for (mut key, value) in entries {
+                        key.lsn = rec.lsn;
+                        memtable.insert(key, value);
+                    }
+                }
                 WalOp::Delete { namespace, doc_id } => {
                     let key = LsmKey {
                         namespace,
@@ -418,6 +424,36 @@ impl LsmEngine {
             self.maybe_flush().await?;
         }
         Ok(lsn)
+    }
+
+    /// 批量插入 / 更新。返回起始 lsn。所有条目共享起始 LSN。
+    pub async fn batch_put(&self, entries: Vec<(LsmKey, LsmValue)>) -> Result<u64> {
+        if entries.is_empty() {
+            return Ok(self.wal.next_lsn());
+        }
+
+        // 计算总字节数用于 flush 检查
+        let total_bytes: u64 = entries
+            .iter()
+            .map(|(k, v)| (LsmKey::ENCODED_LEN + v.encoded_len()) as u64)
+            .sum();
+
+        let start_lsn = self.wal.append_batch(entries.clone()).await?;
+
+        // 批量插入 MemTable
+        let memtable = self.memtable.read().await.clone();
+        for (mut key, value) in entries {
+            key.lsn = start_lsn;
+            memtable.insert(key, value);
+        }
+
+        // 检查是否需要 flush（使用总字节数估算）
+        let current_bytes = memtable.approx_bytes();
+        if current_bytes + total_bytes > self.config.memtable_max_bytes {
+            self.maybe_flush().await?;
+        }
+
+        Ok(start_lsn)
     }
 
     /// 删除（墓碑）。返回分配的 lsn。

@@ -247,3 +247,55 @@ async fn test_io_backend_kind_default() {
     let cfg = LsmConfig::default();
     assert!(matches!(cfg.io_backend, IoBackendKind::AsyncFs));
 }
+
+#[tokio::test]
+async fn test_batch_put_basic() {
+    let dir = tempdir().unwrap();
+    let lsm = LsmEngine::open(dir.path(), LsmConfig::default())
+        .await
+        .unwrap();
+
+    let entries = vec![
+        (LsmKey::doc(1), LsmValue::Data(b"a".to_vec())),
+        (LsmKey::doc(2), LsmValue::Data(b"b".to_vec())),
+        (LsmKey::doc(3), LsmValue::Data(b"c".to_vec())),
+    ];
+
+    let start_lsn = lsm.batch_put(entries).await.unwrap();
+    assert_eq!(start_lsn, 0);
+}
+
+#[tokio::test]
+async fn test_batch_put_recovery() {
+    let dir = tempdir().unwrap();
+    let path = dir.path();
+    {
+        let lsm = LsmEngine::open(path, LsmConfig::default()).await.unwrap();
+        lsm.batch_put(vec![
+            (LsmKey::doc(1), LsmValue::Data(b"v1".to_vec())),
+            (LsmKey::doc(2), LsmValue::Data(b"v2".to_vec())),
+        ])
+        .await
+        .unwrap();
+        drop(lsm);
+    }
+
+    // 重启并恢复
+    let lsm = LsmEngine::open(path, LsmConfig::default()).await.unwrap();
+    let v1 = lsm.get(&LsmKey::doc(1)).await.unwrap();
+    let v2 = lsm.get(&LsmKey::doc(2)).await.unwrap();
+    assert!(matches!(v1, Some(LsmValue::Data(ref b)) if b == b"v1"));
+    assert!(matches!(v2, Some(LsmValue::Data(ref b)) if b == b"v2"));
+}
+
+#[tokio::test]
+async fn test_batch_put_empty() {
+    let dir = tempdir().unwrap();
+    let lsm = LsmEngine::open(dir.path(), LsmConfig::default())
+        .await
+        .unwrap();
+
+    // 空批量应该返回当前 LSN
+    let lsn = lsm.batch_put(vec![]).await.unwrap();
+    assert_eq!(lsn, 0);
+}

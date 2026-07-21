@@ -11,6 +11,7 @@ pub mod index;
 pub mod lexical;
 pub mod schema;
 pub mod storage;
+pub mod vector;
 
 // ---- Phase 1 re-exports ----
 pub use storage::io_backend::{select_backend, AsyncFsBackend, IoBackend, IoBackendKind};
@@ -22,10 +23,16 @@ pub use storage::sstable::{SSTable, SStableWriter};
 pub use storage::wal::{Wal, WalOp, WalSync};
 
 // ---- Phase 2 re-exports ----
-pub use index::{DocId, Index, IndexConfig, SchemalessDoc, VectorEngine};
+pub use index::{DocId, Index, IndexConfig, SchemalessDoc, VectorEngine as VectorEngineOld};
 pub use schema::{
     DynamicSchema, FieldChange, FieldId, FieldMeta, FieldType, TokenizerType, VectorSimilarity,
 };
 
 // ---- Phase 3 re-exports ----
 pub use lexical::{LexicalEngine, ScoredDoc};
+
+// ---- Phase 4 re-exports ----
+pub use vector::{
+    F32Quantization, IvfIndex, partition::Partition, partition::PartitionId, Quantization,
+    QuantizationType, ScoredResult, VectorConfig, VectorEngine,
+};

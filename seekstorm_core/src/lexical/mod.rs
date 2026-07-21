@@ -67,9 +67,19 @@ impl LexicalEngine {
         })
     }
 
-    /// 为文档写入 postings。
-    pub async fn add_document(&self, doc_id: u64, doc: &crate::index::SchemalessDoc) -> Result<()> {
+    /// 准备文档的 posting entries（不实际写入 LSM）。
+    /// 返回 `Vec<(LsmKey, LsmValue)>` 供上层批量写入。
+    /// 同时递增 total_docs 内存计数器。
+    pub async fn prepare_add_document(
+        &self,
+        doc_id: u64,
+        doc: &crate::index::SchemalessDoc,
+    ) -> Result<Vec<(LsmKey, LsmValue)>> {
+        // 递增 total_docs（内存计数器）
+        self.total_docs.fetch_add(1, Ordering::SeqCst);
         let schema = self.schema.read().await;
+        let mut entries = Vec::new();
+
         for (field_name, value) in doc.fields() {
             let Some(meta) = schema.get_field(field_name).await else { continue };
             if !meta.index_lexical { continue }
@@ -87,26 +97,24 @@ impl LexicalEngine {
                 pos += 1;
             }
 
-            // 每个 (field, term, doc) 写一条 LSM entry
+            // 每个 (field, term, doc) 生成一个 entry
             for (term, positions) in term_positions {
                 let partition = hash_field_term(meta.id, &term);
                 let key = LsmKey {
                     namespace: NS_LEXICAL_POSTING,
                     partition_or_segment: partition,
                     doc_id,
-                    lsn: 0,
+                    lsn: 0, // LSN 由上层批量写入时设置
                 };
                 let posting = Posting::new(meta.id, term, doc_id, positions);
                 let value = posting.encode()?;
-                self.lsm.put(key, LsmValue::Data(value)).await?;
+                entries.push((key, LsmValue::Data(value)));
             }
         }
 
-        // 递增 total_docs（内存计数器）
-        self.total_docs.fetch_add(1, Ordering::SeqCst);
-
-        Ok(())
+        Ok(entries)
     }
+
 
     /// 搜索。
     pub async fn search(&self, query_str: &str, top_k: usize) -> Result<Vec<ScoredDoc>> {

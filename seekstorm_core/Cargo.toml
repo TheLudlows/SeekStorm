@@ -28,6 +28,8 @@ indexmap = { version = "2", features = ["serde"] }
 tracing = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["std", "alloc"] }
 tantivy = "0.22"
+num = "0.4"
+rand = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
